@@ -132,7 +132,7 @@ class SafeCreate2TxBuilder:
                                                                          to=to,
                                                                          setup_data=setup_data)
 
-        safe_address = self.calculate_create2_address(final_safe_setup_data, salt_nonce)
+        safe_address = self.calculate_create2_address(final_safe_setup_data, salt_nonce, callback)
         assert int(safe_address, 16), 'Calculated Safe address cannot be the NULL ADDRESS'
 
         return SafeCreate2Tx(salt_nonce, owners, threshold, self.master_copy_address, self.proxy_factory_address,
@@ -150,9 +150,10 @@ class SafeCreate2TxBuilder:
         else:
             return fixed_creation_cost
 
-    def calculate_create2_address(self, safe_setup_data: bytes, salt_nonce: int):
+    def calculate_create2_address(self, safe_setup_data: bytes, salt_nonce: int, callback: Optional[str] = NULL_ADDRESS):
         proxy_creation_code = self.proxy_factory_contract.functions.proxyCreationCode().call()
-        salt = self.w3.sha3(encode_abi_packed(['bytes', 'uint256'], [self.w3.sha3(safe_setup_data), salt_nonce]))
+        saltNonceWithCallback = self.w3.sha3(encode_abi_packed(['uint256', 'address'], [salt_nonce, callback]))
+        salt = self.w3.sha3(encode_abi_packed(['bytes', 'bytes'], [self.w3.sha3(safe_setup_data), saltNonceWithCallback]))
         deployment_data = encode_abi_packed(['bytes', 'uint256'], [proxy_creation_code,
                                                                    int(self.master_copy_address, 16)])
         return generate_address_2(self.proxy_factory_contract.address, salt, deployment_data)
