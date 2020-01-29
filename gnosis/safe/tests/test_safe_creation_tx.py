@@ -3,7 +3,7 @@ import logging
 from django.test import TestCase
 
 from eth_account import Account
-from ethereum.utils import checksum_encode, ecrecover_to_pub, sha3
+from ethereum.utils import ecrecover_to_pub
 
 from gnosis.eth.constants import NULL_ADDRESS
 from gnosis.eth.contracts import get_safe_contract
@@ -34,7 +34,7 @@ class TestSafeCreationTx(SafeTestCaseMixin, TestCase):
                                           owners=owners,
                                           threshold=threshold,
                                           signature_s=s,
-                                          master_copy=self.safe_old_contract_address,
+                                          master_copy=self.safe_contract_V0_0_1_address,
                                           gas_price=gas_price,
                                           funder=NULL_ADDRESS)
 
@@ -73,7 +73,7 @@ class TestSafeCreationTx(SafeTestCaseMixin, TestCase):
                                           owners=owners,
                                           threshold=threshold,
                                           signature_s=s,
-                                          master_copy=self.safe_old_contract_address,
+                                          master_copy=self.safe_contract_V0_0_1_address,
                                           gas_price=gas_price,
                                           funder=NULL_ADDRESS)
 
@@ -103,7 +103,7 @@ class TestSafeCreationTx(SafeTestCaseMixin, TestCase):
                                           owners=owners,
                                           threshold=threshold,
                                           signature_s=s,
-                                          master_copy=self.safe_old_contract_address,
+                                          master_copy=self.safe_contract_V0_0_1_address,
                                           gas_price=gas_price,
                                           funder=funder_account.address)
 
@@ -176,7 +176,7 @@ class TestSafeCreationTx(SafeTestCaseMixin, TestCase):
                                           owners=owners,
                                           threshold=threshold,
                                           signature_s=s,
-                                          master_copy=self.safe_old_contract_address,
+                                          master_copy=self.safe_contract_V0_0_1_address,
                                           gas_price=gas_price,
                                           payment_token=erc20_contract.address,
                                           funder=funder)
@@ -222,7 +222,7 @@ class TestSafeCreationTx(SafeTestCaseMixin, TestCase):
                                             owners=owners,
                                             threshold=threshold,
                                             signature_s=s,
-                                            master_copy=self.safe_old_contract_address,
+                                            master_copy=self.safe_contract_V0_0_1_address,
                                             gas_price=gas_price,
                                             payment_token=erc20_contract.address,
                                             payment_token_eth_value=1.0,
@@ -234,7 +234,7 @@ class TestSafeCreationTx(SafeTestCaseMixin, TestCase):
                                             owners=owners,
                                             threshold=threshold,
                                             signature_s=s,
-                                            master_copy=self.safe_old_contract_address,
+                                            master_copy=self.safe_contract_V0_0_1_address,
                                             gas_price=gas_price,
                                             payment_token=erc20_contract.address,
                                             payment_token_eth_value=1.0,
@@ -246,7 +246,7 @@ class TestSafeCreationTx(SafeTestCaseMixin, TestCase):
                                             owners=owners,
                                             threshold=threshold,
                                             signature_s=s,
-                                            master_copy=self.safe_old_contract_address,
+                                            master_copy=self.safe_contract_V0_0_1_address,
                                             gas_price=gas_price,
                                             payment_token=erc20_contract.address,
                                             payment_token_eth_value=1.1,
@@ -258,7 +258,7 @@ class TestSafeCreationTx(SafeTestCaseMixin, TestCase):
                                             owners=owners,
                                             threshold=threshold,
                                             signature_s=s,
-                                            master_copy=self.safe_old_contract_address,
+                                            master_copy=self.safe_contract_V0_0_1_address,
                                             gas_price=gas_price,
                                             payment_token=erc20_contract.address,
                                             payment_token_eth_value=0.1,
@@ -281,7 +281,7 @@ class TestSafeCreationTx(SafeTestCaseMixin, TestCase):
                                           owners=owners,
                                           threshold=threshold,
                                           signature_s=s,
-                                          master_copy=self.safe_old_contract_address,
+                                          master_copy=self.safe_contract_V0_0_1_address,
                                           gas_price=gas_price,
                                           payment_token=None,
                                           funder=funder_account.address,
@@ -342,7 +342,7 @@ class TestSafeCreationTx(SafeTestCaseMixin, TestCase):
                                               owners=owners,
                                               threshold=threshold,
                                               signature_s=s,
-                                              master_copy=self.safe_old_contract_address,
+                                              master_copy=self.safe_contract_V0_0_1_address,
                                               gas_price=gas_price,
                                               funder=None)
 
@@ -359,35 +359,3 @@ class TestSafeCreationTx(SafeTestCaseMixin, TestCase):
                         safe_creation_tx.gas,
                         tx_receipt.gasUsed,
                         safe_creation_tx.gas - tx_receipt.gasUsed)
-
-    def test_w3_same_tx_pyethereum(self):
-        w3 = self.w3
-
-        funder_account = self.ethereum_test_account
-        owners = [get_eth_address_with_key()[0] for _ in range(4)]
-        threshold = len(owners) - 1
-        gas_price = w3.toWei(15, 'gwei')
-
-        s = generate_valid_s()
-
-        safe_creation_tx = SafeCreationTx(w3=w3,
-                                          owners=owners,
-                                          threshold=threshold,
-                                          signature_s=s,
-                                          master_copy=self.safe_old_contract_address,
-                                          gas_price=gas_price,
-                                          funder=funder_account.address)
-
-        web3_transaction = safe_creation_tx.tx_dict
-
-        # Signing transaction
-        v, r = safe_creation_tx.v, safe_creation_tx.r
-
-        rlp_encoded_transaction, hash = SafeCreationTx._sign_web3_transaction(web3_transaction, v, r, s)
-
-        address_64_encoded = ecrecover_to_pub(hash, v, r, s)
-        address_bytes = sha3(address_64_encoded)[-20:]
-        deployer_address = checksum_encode(address_bytes)
-
-        self.assertEqual(safe_creation_tx.tx_raw, rlp_encoded_transaction)
-        self.assertEqual(safe_creation_tx.deployer_address, deployer_address)

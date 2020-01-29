@@ -1,11 +1,16 @@
+from unittest import mock
+
 from django.test import TestCase
 
 from eth_account import Account
 from hexbytes import HexBytes
 from web3.datastructures import AttributeDict
+from web3.net import Net
 
-from ..ethereum_client import (EthereumClientProvider, FromAddressNotFound,
-                               InsufficientFunds, InvalidNonce,
+from ..constants import GAS_CALL_DATA_BYTE
+from ..ethereum_client import (EthereumClientProvider, EthereumNetworkName,
+                               FromAddressNotFound, InsufficientFunds,
+                               InvalidERC20Info, InvalidNonce,
                                SenderAccountNotFoundInNode)
 from ..utils import get_eth_address_with_key
 from .ethereum_test_case import EthereumTestCaseMixin
@@ -140,6 +145,31 @@ class TestERC20Module(EthereumTestCaseMixin, TestCase):
         token_balance = self.ethereum_client.erc20.get_balance(another_account, erc20_contract.address)
         self.assertEqual(token_balance, 0)
 
+    def test_get_balances(self):
+        account_address = Account.create().address
+        self.assertEqual(self.ethereum_client.erc20.get_balances(account_address, []),
+                         [{'token_address': None, 'balance': 0}])
+
+        value = 7
+        self.send_ether(account_address, 7)
+        self.assertEqual(self.ethereum_client.erc20.get_balances(account_address, []),
+                         [{'token_address': None, 'balance': value}])
+
+        tokens_value = 12
+        erc20 = self.deploy_example_erc20(tokens_value, account_address)
+        self.assertCountEqual(self.ethereum_client.erc20.get_balances(account_address, [erc20.address]),
+                              [{'token_address': None, 'balance': value},
+                               {'token_address': erc20.address, 'balance': tokens_value}])
+
+        tokens_value_2 = 19
+        erc20_2 = self.deploy_example_erc20(tokens_value_2, account_address)
+        self.assertCountEqual(self.ethereum_client.erc20.get_balances(account_address, [erc20.address,
+                                                                                        erc20_2.address]),
+                              [{'token_address': None, 'balance': value},
+                               {'token_address': erc20.address, 'balance': tokens_value},
+                               {'token_address': erc20_2.address, 'balance': tokens_value_2}
+                               ])
+
     def test_get_blocks(self):
         self.assertEqual(self.ethereum_client.get_blocks([]), [])
         # Generate 3 blocks
@@ -265,6 +295,9 @@ class TestERC20Module(EthereumTestCaseMixin, TestCase):
         erc20_info = self.ethereum_client.erc20.get_info(erc20_contract.address)
         self.assertEqual(erc20_info.decimals, 18)
 
+        with self.assertRaises(InvalidERC20Info):
+            self.ethereum_client.erc20.get_info(Account.create().address)
+
     def test_send_tokens(self):
         amount = 5
         owner = self.ethereum_test_account
@@ -273,7 +306,7 @@ class TestERC20Module(EthereumTestCaseMixin, TestCase):
         self.assertEqual(self.ethereum_client.erc20.get_balance(owner.address, erc20.address), amount)
 
         amount_2 = 3
-        self.ethereum_client.erc20.send_tokens(owner_2.address, amount_2, erc20.address, owner.privateKey)
+        self.ethereum_client.erc20.send_tokens(owner_2.address, amount_2, erc20.address, owner.key)
         self.assertEqual(self.ethereum_client.erc20.get_balance(owner.address, erc20.address), amount - amount_2)
         self.assertEqual(self.ethereum_client.erc20.get_balance(owner_2.address, erc20.address), amount_2)
 
@@ -389,6 +422,20 @@ class TestParityModule(EthereumTestCaseMixin, TestCase):
             self.ethereum_client.parity.trace_filter(from_address=Account.create().address)
 
 
+class TestEthereumNetworkName(EthereumTestCaseMixin, TestCase):
+    def test_default_ethereum_network_name(self):
+        self.assertEqual(EthereumNetworkName(EthereumNetworkName.default), EthereumNetworkName.UNKNOWN)
+
+    def test_default_ethereum_network_name(self):
+        self.assertEqual(EthereumNetworkName(2), EthereumNetworkName.UNKNOWN)
+
+    def test_mainnet_ethereum_network_name(self):
+        self.assertEqual(EthereumNetworkName(1), EthereumNetworkName.MAINNET)
+
+    def test_rinkeby_ethereum_network_name(self):
+        self.assertEqual(EthereumNetworkName(4), EthereumNetworkName.RINKEBY)
+
+
 class TestEthereumClient(EthereumTestCaseMixin, TestCase):
     def test_current_block_number(self):
         self.assertGreaterEqual(self.ethereum_client.current_block_number, 0)
@@ -423,15 +470,15 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
         value = 1
         to, _ = get_eth_address_with_key()
 
-        tx_hash = self.ethereum_client.send_eth_to(self.ethereum_test_account.privateKey,
+        tx_hash = self.ethereum_client.send_eth_to(self.ethereum_test_account.key,
                                                    to=to, gas_price=self.gas_price, value=value)
         self.assertFalse(self.ethereum_client.check_tx_with_confirmations(tx_hash, 2))
 
-        _ = self.ethereum_client.send_eth_to(self.ethereum_test_account.privateKey,
+        _ = self.ethereum_client.send_eth_to(self.ethereum_test_account.key,
                                              to=to, gas_price=self.gas_price, value=value)
         self.assertFalse(self.ethereum_client.check_tx_with_confirmations(tx_hash, 2))
 
-        _ = self.ethereum_client.send_eth_to(self.ethereum_test_account.privateKey,
+        _ = self.ethereum_client.send_eth_to(self.ethereum_test_account.key,
                                              to=to, gas_price=self.gas_price, value=value)
         self.assertTrue(self.ethereum_client.check_tx_with_confirmations(tx_hash, 2))
 
@@ -482,8 +529,19 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
         gas2 = self.ethereum_client.estimate_gas(from_, erc20_contract.address, 0, data, block_identifier='pending')
         self.assertLess(gas2, gas)
 
+    def test_get_ethereum_network_default(self):
+        self.assertEqual(self.ethereum_client.get_network_name(), EthereumNetworkName.UNKNOWN)
+
+    @mock.patch.object(Net, 'version', return_value='1', new_callable=mock.PropertyMock)
+    def test_mock_get_ethereum_network_mainnet(self, version_mock):
+        self.assertEqual(self.ethereum_client.get_network_name(), EthereumNetworkName.MAINNET)
+
+    @mock.patch.object(Net, 'version', return_value='4', new_callable=mock.PropertyMock)
+    def test_mock_get_ethereum_network_rinkeby(self, version_mock):
+        self.assertEqual(self.ethereum_client.get_network_name(), EthereumNetworkName.RINKEBY)
+
     def test_get_nonce(self):
-        address, _ = get_eth_address_with_key()
+        address = Account.create().address
         nonce = self.ethereum_client.get_nonce_for_account(address)
         self.assertEqual(nonce, 0)
 
@@ -493,11 +551,12 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
     def test_estimate_data_gas(self):
         self.assertEqual(self.ethereum_client.estimate_data_gas(HexBytes('')), 0)
         self.assertEqual(self.ethereum_client.estimate_data_gas(HexBytes('0x00')), 4)
-        self.assertEqual(self.ethereum_client.estimate_data_gas(HexBytes('0x000204')), 4 + 68 * 2)
-        self.assertEqual(self.ethereum_client.estimate_data_gas(HexBytes('0x050204')), 68 * 3)
-        self.assertEqual(self.ethereum_client.estimate_data_gas(HexBytes('0x0502040000')), 68 * 3 + 4 * 2)
-        self.assertEqual(self.ethereum_client.estimate_data_gas(HexBytes('0x050204000001')), 68 * 4 + 4 * 2)
-        self.assertEqual(self.ethereum_client.estimate_data_gas(HexBytes('0x00050204000001')), 4 + 68 * 4 + 4 * 2)
+        self.assertEqual(self.ethereum_client.estimate_data_gas(HexBytes('0x000204')), 4 + GAS_CALL_DATA_BYTE * 2)
+        self.assertEqual(self.ethereum_client.estimate_data_gas(HexBytes('0x050204')), GAS_CALL_DATA_BYTE * 3)
+        self.assertEqual(self.ethereum_client.estimate_data_gas(HexBytes('0x0502040000')), GAS_CALL_DATA_BYTE * 3 + 4 * 2)
+        self.assertEqual(self.ethereum_client.estimate_data_gas(HexBytes('0x050204000001')), GAS_CALL_DATA_BYTE * 4 + 4 * 2)
+        self.assertEqual(self.ethereum_client.estimate_data_gas(HexBytes('0x00050204000001')),
+                         4 + GAS_CALL_DATA_BYTE * 4 + 4 * 2)
 
     def test_provider_singleton(self):
         ethereum_client1 = EthereumClientProvider()
@@ -507,7 +566,7 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
     def test_send_eth_to(self):
         address, _ = get_eth_address_with_key()
         value = 1
-        self.ethereum_client.send_eth_to(self.ethereum_test_account.privateKey, address, self.gas_price, value)
+        self.ethereum_client.send_eth_to(self.ethereum_test_account.key, address, self.gas_price, value)
         self.assertEqual(self.ethereum_client.get_balance(address), value)
 
     def test_send_eth_without_key(self):
@@ -585,7 +644,7 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
 
     def test_send_unsigned_transaction_with_private_key(self):
         account = self.create_account(initial_ether=0.1)
-        key = account.privateKey
+        key = account.key
         to, _ = get_eth_address_with_key()
         value = 4
 
@@ -620,13 +679,13 @@ class TestEthereumClient(EthereumTestCaseMixin, TestCase):
         value = 1
         to = Account.create().address
 
-        tx_hash = self.ethereum_client.send_eth_to(self.ethereum_test_account.privateKey,
+        tx_hash = self.ethereum_client.send_eth_to(self.ethereum_test_account.key,
                                                    to=to, gas_price=self.gas_price, value=value)
         receipt1 = self.ethereum_client.get_transaction_receipt(tx_hash, timeout=None)
         receipt2 = self.ethereum_client.get_transaction_receipt(tx_hash, timeout=20)
         self.assertIsNotNone(receipt1)
         self.assertEqual(receipt1, receipt2)
 
-        fake_tx_hash = self.w3.sha3(0)
+        fake_tx_hash = self.w3.keccak(0)
         self.assertIsNone(self.ethereum_client.get_transaction_receipt(fake_tx_hash, timeout=None))
         self.assertIsNone(self.ethereum_client.get_transaction_receipt(fake_tx_hash, timeout=1))

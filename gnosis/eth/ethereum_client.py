@@ -1,28 +1,50 @@
+from enum import Enum
 from functools import wraps
 from logging import getLogger
 from typing import Any, Dict, List, NamedTuple, Optional, Union
 
 import eth_abi
 import requests
+from eth_abi.exceptions import InsufficientDataBytes
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
-from ethereum.utils import (check_checksum, checksum_encode, ecrecover_to_pub,
-                            mk_contract_address, privtoaddr, sha3)
+from ethereum.utils import (check_checksum, checksum_encode,
+                            mk_contract_address, privtoaddr)
 from hexbytes import HexBytes
 from web3 import HTTPProvider, Web3
+from web3._utils.method_formatters import (block_formatter, receipt_formatter,
+                                           transaction_formatter)
+from web3.exceptions import BlockNotFound, TimeExhausted, TransactionNotFound
 from web3.middleware import geth_poa_middleware
-from web3.middleware.pythonic import (block_formatter, receipt_formatter,
-                                      transaction_formatter)
 from web3.providers import AutoProvider
-from web3.utils.threads import Timeout
 
-from .constants import ERC20_721_TRANSFER_TOPIC, NULL_ADDRESS
+from .constants import (ERC20_721_TRANSFER_TOPIC, GAS_CALL_DATA_BYTE,
+                        GAS_CALL_DATA_ZERO_BYTE, NULL_ADDRESS)
 from .contracts import get_erc20_contract
+from .utils import decode_string_or_bytes32
 
 logger = getLogger(__name__)
 
 
 EthereumHash = Union[bytes, str]
+
+
+class EthereumNetworkName(Enum):
+    UNKNOWN = -1
+    OLYMPIC = 0
+    MAINNET = 1
+    ROPSTEN = 3
+    RINKEBY = 4
+    GOERLI = 5
+    KOVAN = 42
+    default = UNKNOWN
+
+    @classmethod
+    def _missing_(cls, value):
+        return cls.UNKNOWN
+
+    def __str__(self):
+        return str(self.value)
 
 
 class EthereumClientException(ValueError):
@@ -69,6 +91,10 @@ class ParityTraceDecodeException(EthereumClientException):
     pass
 
 
+class InvalidERC20Info(EthereumClientException):
+    pass
+
+
 def tx_with_exception_handling(func):
     error_with_exception: Dict[str, Exception] = {
         'Transaction with the same hash was already imported': TransactionAlreadyImported,
@@ -104,7 +130,7 @@ class EthereumTxSent(NamedTuple):
     contract_address: Optional[str]
 
 
-class Erc20_Info(NamedTuple):
+class Erc20Info(NamedTuple):
     name: str
     symbol: str
     decimals: int
@@ -174,18 +200,61 @@ class Erc20Manager:
         """
         return get_erc20_contract(self.w3, erc20_address).functions.balanceOf(address).call()
 
-    def get_info(self, erc20_address: str) -> Erc20_Info:
+    def get_balances(self, address: str, erc20_addresses: List[str]) -> List[Dict[str, Union[str, int]]]:
+        # Build ether `eth_getBalance` query
+        balance_query = {"jsonrpc": "2.0",
+                         "method": "eth_getBalance",
+                         "params": [address, "latest"],
+                         "id": 0}
+        queries = [balance_query]
+
+        # Build tokens `balanceOf` query
+        for i, erc20_address in enumerate(erc20_addresses):
+            queries.append({"jsonrpc": "2.0",
+                            "method": "eth_call",
+                            "params": [{"to": erc20_address,  # Balance of
+                                        "data": "0x70a08231" + '{:0>64}'.format(address.replace('0x', '').lower())
+                                        }, "latest"],
+                            "id": i + 1})
+        response = requests.post(self.ethereum_client.ethereum_node_url, json=queries)
+        balances = []
+        for token_address, data in zip([None] + erc20_addresses, response.json()):
+            balances.append({
+                'token_address': token_address,
+                'balance': 0 if data['result'] == '0x' else int(data['result'], 16)
+            })
+        return balances
+
+    def get_name(self, erc20_address: str) -> str:
+        erc20 = get_erc20_contract(self.w3, erc20_address)
+        data = erc20.functions.name().buildTransaction({'gas': 0, 'gasPrice': 0})['data']
+        result = self.w3.eth.call({'to': erc20_address, 'data': data})
+        return decode_string_or_bytes32(result)
+
+    def get_symbol(self, erc20_address: str) -> str:
+        erc20 = get_erc20_contract(self.w3, erc20_address)
+        data = erc20.functions.symbol().buildTransaction({'gas': 0, 'gasPrice': 0})['data']
+        result = self.w3.eth.call({'to': erc20_address, 'data': data})
+        return decode_string_or_bytes32(result)
+
+    def get_decimals(self, erc20_address: str) -> int:
+        erc20 = get_erc20_contract(self.w3, erc20_address)
+        return erc20.functions.decimals().call()
+
+    def get_info(self, erc20_address: str) -> Erc20Info:
         """
         Get erc20 information (`name`, `symbol` and `decimals`)
         :param erc20_address:
-        :return: Erc20_Info
+        :return: Erc20Info
         """
         # We use the `example erc20` as the `erc20 interface` doesn't have `name`, `symbol` nor `decimals`
-        erc20 = get_erc20_contract(self.w3, erc20_address)
-        name = erc20.functions.name().call()
-        symbol = erc20.functions.symbol().call()
-        decimals = erc20.functions.decimals().call()
-        return Erc20_Info(name, symbol, decimals)
+        try:
+            name = self.get_name(erc20_address)
+            symbol = self.get_symbol(erc20_address)
+            decimals = self.get_decimals(erc20_address)
+            return Erc20Info(name, symbol, decimals)
+        except (InsufficientDataBytes, ValueError) as e:
+            raise InvalidERC20Info from e
 
     def get_total_transfer_history(self, addresses: List[str], from_block: int = 0,
                                    to_block: Optional[int] = None,
@@ -306,18 +375,30 @@ class Erc20Manager:
                                                   address=token_address,
                                                   argument_filters=argument_filters).get_all_entries()
 
-    def send_tokens(self, to: str, amount: int, erc20_address: str, private_key: str) -> bytes:
+    def send_tokens(self, to: str, amount: int, erc20_address: str, private_key: str,
+                    nonce: Optional[int] = None, gas_price: Optional[int] = None, gas: Optional[int] = None) -> bytes:
         """
         Send tokens to address
         :param to:
         :param amount:
         :param erc20_address:
         :param private_key:
+        :param nonce:
+        :param gas_price:
+        :param gas:
         :return: tx_hash
         """
         erc20 = get_erc20_contract(self.w3, erc20_address)
-        account = Account.privateKeyToAccount(private_key)
-        tx = erc20.functions.transfer(to, amount).buildTransaction({'from': account.address})
+        account = Account.from_key(private_key)
+        tx_options = {'from': account.address}
+        if nonce:
+            tx_options['nonce'] = nonce
+        if gas_price:
+            tx_options['gasPrice'] = gas_price
+        if gas:
+            tx_options['gas'] = gas
+
+        tx = erc20.functions.transfer(to, amount).buildTransaction(tx_options)
         return self.ethereum_client.send_unsigned_transaction(tx, private_key=private_key)
 
 
@@ -530,10 +611,10 @@ class EthereumClient:
         self.parity: ParityManager = ParityManager(self, slow_provider_timeout)
         try:
             if int(self.w3.net.version) != 1:
-                self.w3.middleware_stack.inject(geth_poa_middleware, layer=0)
+                self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
             # For tests using dummy connections (like IPC)
         except (ConnectionError, FileNotFoundError):
-            self.w3.middleware_stack.inject(geth_poa_middleware, layer=0)
+            self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
     def deploy_and_initialize_contract(self, deployer_account: LocalAccount,
                                        constructor_data: bytes, initializer_data: bytes = b'',
@@ -548,7 +629,7 @@ class EthereumClient:
                       'value': 0,
                       'to': contract_address if contract_address else b''}
                 tx['gas'] = self.w3.eth.estimateGas(tx)
-                tx_hash = self.send_unsigned_transaction(tx, private_key=deployer_account.privateKey)
+                tx_hash = self.send_unsigned_transaction(tx, private_key=deployer_account.key)
                 if check_receipt:
                     tx_receipt = self.get_transaction_receipt(tx_hash, timeout=60)
                     assert tx_receipt.status
@@ -572,6 +653,13 @@ class EthereumClient:
                                 request_kwargs={'timeout': timeout})
         else:
             return self.w3_provider
+
+    def get_network_name(self) -> EthereumNetworkName:
+        """
+        Get network name based on the network version id
+        :return: The EthereumNetworkName enum type
+        """
+        return EthereumNetworkName(int(self.w3.net.version))
 
     def get_nonce_for_account(self, address: str, block_identifier: Optional[str] = 'latest'):
         """
@@ -641,16 +729,19 @@ class EthereumClient:
         gas = 0
         for byte in data:
             if not byte:
-                gas += 4  # Byte 0 -> 4 Gas
+                gas += GAS_CALL_DATA_ZERO_BYTE
             else:
-                gas += 68  # Any other byte -> 68 Gas
+                gas += GAS_CALL_DATA_BYTE
         return gas
 
     def get_balance(self, address: str, block_identifier=None):
         return self.w3.eth.getBalance(address, block_identifier)
 
     def get_transaction(self, tx_hash: EthereumHash) -> Optional[Dict[str, Any]]:
-        return self.w3.eth.getTransaction(tx_hash)
+        try:
+            return self.w3.eth.getTransaction(tx_hash)
+        except TransactionNotFound:
+            return None
 
     def get_transactions(self, tx_hashes: List[EthereumHash]) -> List[Optional[Dict[str, Any]]]:
         if not tx_hashes:
@@ -669,16 +760,19 @@ class EthereumClient:
         return txs
 
     def get_transaction_receipt(self, tx_hash: EthereumHash, timeout=None) -> Optional[Dict[str, Any]]:
-        if not timeout:
-            tx_receipt = self.w3.eth.getTransactionReceipt(tx_hash)
-        else:
-            try:
-                tx_receipt = self.w3.eth.waitForTransactionReceipt(tx_hash, timeout=timeout)
-            except Timeout:
-                return None
+        try:
+            if not timeout:
+                tx_receipt = self.w3.eth.getTransactionReceipt(tx_hash)
+            else:
+                try:
+                    tx_receipt = self.w3.eth.waitForTransactionReceipt(tx_hash, timeout=timeout)
+                except TimeExhausted:
+                    return None
 
-        # Parity returns tx_receipt even is tx is still pending, so we check `blockNumber` is not None
-        return tx_receipt if tx_receipt and tx_receipt['blockNumber'] is not None else None
+            # Parity returns tx_receipt even is tx is still pending, so we check `blockNumber` is not None
+            return tx_receipt if tx_receipt and tx_receipt['blockNumber'] is not None else None
+        except TransactionNotFound:
+            return None
 
     def get_transaction_receipts(self, tx_hashes: EthereumHash) -> List[Optional[Dict[str, Any]]]:
         if not tx_hashes:
@@ -698,7 +792,10 @@ class EthereumClient:
         return receipts
 
     def get_block(self, block_number: int, full_transactions=False) -> Optional[Dict[str, Any]]:
-        return self.w3.eth.getBlock(block_number, full_transactions=full_transactions)
+        try:
+            return self.w3.eth.getBlock(block_number, full_transactions=full_transactions)
+        except BlockNotFound:
+            return None
 
     def get_blocks(self, block_numbers: List[int], full_transactions=False) -> List[Optional[Dict[str, Any]]]:
         if not block_numbers:
@@ -710,8 +807,9 @@ class EthereumClient:
         blocks = []
         for result in results:
             raw_block = result['result']
-            del raw_block['extraData']  # Remove extraData, raises some problems on parsing
             if raw_block:
+                if 'extraData' in raw_block:
+                    del raw_block['extraData']  # Remove extraData, raises some problems on parsing
                 blocks.append(block_formatter(raw_block))
             else:
                 blocks.append(None)
@@ -756,7 +854,7 @@ class EthereumClient:
         while number_errors >= 0:
             try:
                 if private_key:
-                    signed_tx = self.w3.eth.account.signTransaction(tx, private_key=private_key)
+                    signed_tx = self.w3.eth.account.sign_transaction(tx, private_key=private_key)
                     logger.debug('Sending %d wei from %s to %s', tx['value'], address, tx['to'])
                     try:
                         return self.send_raw_transaction(signed_tx.rawTransaction)
@@ -822,7 +920,7 @@ class EthereumClient:
         :param confirmations: Minimum number of confirmations required
         :return: True if tx was mined with the number of confirmations required, False otherwise
         """
-        tx_receipt = self.w3.eth.getTransactionReceipt(tx_hash)
+        tx_receipt = self.get_transaction_receipt(tx_hash)
         if not tx_receipt or tx_receipt['blockNumber'] is None:
             # If `tx_receipt` exists but `blockNumber` is `None`, tx is still pending (just Parity)
             return False

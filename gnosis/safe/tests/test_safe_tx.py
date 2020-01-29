@@ -5,6 +5,7 @@ from django.test import TestCase
 from eth_account import Account
 from hexbytes import HexBytes
 
+from ...eth.contracts import get_safe_contract
 from ..exceptions import NotEnoughSafeTransactionGas, SignaturesDataTooShort
 from ..multi_send import MultiSendOperation, MultiSendTx
 from ..safe import Safe, SafeOperation
@@ -27,7 +28,7 @@ class TestSafeTx(SafeTestCaseMixin, TestCase):
         to = self.multi_send_contract.address
         value = 0
         safe_tx_gas = 600000
-        data_gas = 200000
+        base_gas = 200000
 
         # Atomic swap the owner of a Safe
         new_owner = Account.create()
@@ -36,20 +37,19 @@ class TestSafeTx(SafeTestCaseMixin, TestCase):
         owners_expected = [x.address for x in owners[:-1]] + [new_owner.address]
         new_threshold = threshold + 1
         data = HexBytes(safe_contract.functions.addOwnerWithThreshold(new_owner.address,
-                                                                      new_threshold).buildTransaction()['data'])
+                                                                      new_threshold).buildTransaction({'gas': 0})['data'])
         data_2 = HexBytes(safe_contract.functions.removeOwner(prev_owner.address, owner_to_remove.address,
-                                                              new_threshold).buildTransaction()['data'])
+                                                              new_threshold).buildTransaction({'gas': 0})['data'])
 
-        multisend_txs = [MultiSendTx(MultiSendOperation.CALL, safe_address,
-                                              value, d) for d in (data, data_2)]
+        multisend_txs = [MultiSendTx(MultiSendOperation.CALL, safe_address, value, d) for d in (data, data_2)]
         safe_multisend_data = self.multi_send.prepare_tx(multisend_txs)['data']
         safe_tx = SafeTx(self.ethereum_client, safe_address, to,
                          0, safe_multisend_data, SafeOperation.DELEGATE_CALL.value,
-                         safe_tx_gas, data_gas, self.gas_price, None, None, safe_nonce=0)
-        safe_tx.sign(owners[0].privateKey)
+                         safe_tx_gas, base_gas, self.gas_price, None, None, safe_nonce=0)
+        safe_tx.sign(owners[0].key)
 
-        self.assertEqual(safe_tx.call(), 1)
-        tx_hash, _ = safe_tx.execute(tx_sender_private_key=self.ethereum_test_account.privateKey)
+        self.assertEqual(safe_tx.call(tx_sender_address=self.ethereum_test_account.address), 1)
+        tx_hash, _ = safe_tx.execute(tx_sender_private_key=self.ethereum_test_account.key)
         self.ethereum_client.get_transaction_receipt(tx_hash, timeout=60)
         self.assertEqual(safe.retrieve_nonce(), 1)
         self.assertEqual(safe.retrieve_threshold(), new_threshold)
@@ -75,14 +75,14 @@ class TestSafeTx(SafeTestCaseMixin, TestCase):
 
         # Check signing
         self.assertFalse(safe_tx.signers)
-        safe_tx.sign(owners[0].privateKey)
+        safe_tx.sign(owners[0].key)
         self.assertIn(owners[0].address, safe_tx.signers)
 
         with self.assertRaises(NotEnoughSafeTransactionGas):
             safe_tx.call(tx_sender_address=self.ethereum_test_account.address, tx_gas=safe_tx_gas // 2)
 
         self.assertEqual(safe_tx.call(tx_sender_address=self.ethereum_test_account.address), 1)
-        tx_hash, _ = safe_tx.execute(tx_sender_private_key=self.ethereum_test_account.privateKey)
+        tx_hash, _ = safe_tx.execute(tx_sender_private_key=self.ethereum_test_account.key)
         self.ethereum_client.get_transaction_receipt(tx_hash, timeout=60)
         self.assertEqual(self.ethereum_client.get_balance(to), value)
 
@@ -103,8 +103,8 @@ class TestSafeTx(SafeTestCaseMixin, TestCase):
         safe_tx = SafeTx(self.ethereum_client, safe_address, to, value, b'', 0, 200000, 100000, self.gas_price,
                          None, None, safe_nonce=0)
 
-        safe_tx.sign(owners_unsorted[0].privateKey)
-        safe_tx.sign(owners_unsorted[2].privateKey)
+        safe_tx.sign(owners_unsorted[0].key)
+        safe_tx.sign(owners_unsorted[2].key)
         signers = [owner_addresses[0], owner_addresses[2]]
 
         self.assertEqual(safe_tx.signers, safe_tx.sorted_signers)
@@ -112,7 +112,7 @@ class TestSafeTx(SafeTestCaseMixin, TestCase):
         self.assertEqual(set(signers), set(safe_tx.signers))
         self.assertEqual(len(safe_tx.signers), 2)
 
-        safe_tx.sign(owners_unsorted[1].privateKey)
+        safe_tx.sign(owners_unsorted[1].key)
         signers = owner_addresses
         self.assertEqual(safe_tx.signers, safe_tx.sorted_signers)
         self.assertNotEqual(signers, safe_tx.signers)
@@ -120,7 +120,7 @@ class TestSafeTx(SafeTestCaseMixin, TestCase):
         self.assertEqual(len(safe_tx.signers), 3)
 
         # Sign again
-        safe_tx.sign(owners_unsorted[0].privateKey)
+        safe_tx.sign(owners_unsorted[0].key)
         self.assertEqual(len(safe_tx.signers), 3)
 
         # Sign again
@@ -188,8 +188,10 @@ class TestSafeTx(SafeTestCaseMixin, TestCase):
                          safe_nonce=257000).safe_tx_hash
         self.assertEqual(expected_hash, tx_hash)
 
+        safe_create2_tx = self.deploy_test_safe()
+        safe_address = safe_create2_tx.safe_address
         # Expected hash must be the same calculated by `getTransactionHash` of the contract
-        expected_hash = self.safe_contract.functions.getTransactionHash(
+        expected_hash = get_safe_contract(self.ethereum_client.w3, safe_address).functions.getTransactionHash(
             '0x5AC255889882aaB35A2aa939679E3F3d4Cea221E',
             5212459,
             HexBytes(0x00),
@@ -200,15 +202,15 @@ class TestSafeTx(SafeTestCaseMixin, TestCase):
             '0x' + '2' * 40,
             '0x' + '2' * 40,
             10789).call()
-        tx_hash = SafeTx(self.ethereum_client, self.safe_contract_address,
-                         '0x5AC255889882aaB35A2aa939679E3F3d4Cea221E',
-                         5212459,
-                         HexBytes(0x00),
-                         1,
-                         123456,
-                         122,
-                         12345,
-                         '0x' + '2' * 40,
-                         '0x' + '2' * 40,
-                         safe_nonce=10789).safe_tx_hash
-        self.assertEqual(HexBytes(expected_hash), tx_hash)
+        safe_tx_hash = SafeTx(self.ethereum_client, safe_address,
+                              '0x5AC255889882aaB35A2aa939679E3F3d4Cea221E',
+                              5212459,
+                              HexBytes(0x00),
+                              1,
+                              123456,
+                              122,
+                              12345,
+                              '0x' + '2' * 40,
+                              '0x' + '2' * 40,
+                              safe_nonce=10789).safe_tx_hash
+        self.assertEqual(HexBytes(expected_hash), safe_tx_hash)

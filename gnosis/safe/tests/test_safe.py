@@ -6,7 +6,7 @@ from eth_account import Account
 from hexbytes import HexBytes
 from web3 import Web3
 
-from gnosis.eth.constants import NULL_ADDRESS
+from gnosis.eth.constants import GAS_CALL_DATA_BYTE, NULL_ADDRESS
 from gnosis.eth.contracts import get_safe_contract
 from gnosis.eth.utils import get_eth_address_with_key
 
@@ -44,7 +44,7 @@ class TestSafe(SafeTestCaseMixin, TestCase):
         number_owners = 4
         gas_price = self.gas_price
         payment_token = NULL_ADDRESS
-        safe_creation_estimate = Safe.estimate_safe_creation(self.ethereum_client, self.safe_old_contract_address,
+        safe_creation_estimate = Safe.estimate_safe_creation(self.ethereum_client, self.safe_contract_V0_0_1_address,
                                                              number_owners, gas_price, payment_token)
         self.assertGreater(safe_creation_estimate.gas_price, 0)
         self.assertGreater(safe_creation_estimate.gas, 0)
@@ -251,13 +251,13 @@ class TestSafe(SafeTestCaseMixin, TestCase):
                 gas_token,
                 refund_receiver,
                 signature_packed,
-                tx_sender_private_key=owner_account.privateKey,
+                tx_sender_private_key=owner_account.key,
                 tx_gas_price=self.gas_price,
             )
 
         # Give erc20 tokens to the safe
         self.ethereum_client.erc20.send_tokens(my_safe_address, amount_token, erc20_contract.address,
-                                               funder_account.privateKey)
+                                               funder_account.key)
 
         safe.send_multisig_tx(
             to,
@@ -270,7 +270,7 @@ class TestSafe(SafeTestCaseMixin, TestCase):
             gas_token,
             refund_receiver,
             signature_packed,
-            tx_sender_private_key=owner_account.privateKey,
+            tx_sender_private_key=owner_account.key,
             tx_gas_price=self.gas_price,
         )
 
@@ -297,9 +297,9 @@ class TestSafe(SafeTestCaseMixin, TestCase):
         base_gas = safe.estimate_tx_base_gas(to, value, data, operation, gas_token, estimate_tx_gas)
         self.assertGreater(base_gas, 0)
 
-        data = HexBytes('0xabcdefbb')  # A byte that was 00 now is bb, so -4 + 68
+        data = HexBytes('0xabcdefbb')  # A byte that was 00 now is bb, so -4 + GAS_CALL_DATA_BYTE
         data_gas2 = safe.estimate_tx_base_gas(to, value, data, operation, gas_token, estimate_tx_gas)
-        self.assertEqual(data_gas2, base_gas + 68 - 4)
+        self.assertEqual(data_gas2, base_gas + GAS_CALL_DATA_BYTE - 4)
 
     def test_estimate_tx_gas(self):
         to = Account().create().address
@@ -326,6 +326,11 @@ class TestSafe(SafeTestCaseMixin, TestCase):
         self.assertIsNotNone(Safe(self.deploy_test_safe().safe_address,
                                   self.ethereum_client).retrieve_code())
 
+    def test_retrieve_fallback_handler(self):
+        random_fallback_handler = Account.create().address
+        safe = Safe(self.deploy_test_safe(fallback_handler=random_fallback_handler).safe_address, self.ethereum_client)
+        self.assertEqual(safe.retrieve_fallback_handler(), random_fallback_handler)
+
     def test_retrieve_info(self):
         safe_creation = self.deploy_test_safe()
         safe = Safe(safe_creation.safe_address, self.ethereum_client)
@@ -344,12 +349,13 @@ class TestSafe(SafeTestCaseMixin, TestCase):
         safe_creation = self.deploy_test_safe(owners=[self.ethereum_test_account.address])
         safe = Safe(safe_creation.safe_address, self.ethereum_client)
         safe_contract = safe.get_contract()
-        fake_tx_hash = Web3.sha3(text='Knopfler')
-        another_tx_hash = Web3.sha3(text='Marc')
-        tx = safe_contract.functions.approveHash(fake_tx_hash).buildTransaction()
-        tx['gas'] = tx['gas'] * 2
+        fake_tx_hash = Web3.keccak(text='Knopfler')
+        another_tx_hash = Web3.keccak(text='Marc')
+        tx = safe_contract.functions.approveHash(
+            fake_tx_hash
+        ).buildTransaction({'from': self.ethereum_test_account.address})
 
-        self.ethereum_client.send_unsigned_transaction(tx, private_key=self.ethereum_test_account.privateKey)
+        self.ethereum_client.send_unsigned_transaction(tx, private_key=self.ethereum_test_account.key)
         self.assertTrue(safe.retrieve_is_hash_approved(self.ethereum_test_account.address, fake_tx_hash))
         self.assertFalse(safe.retrieve_is_hash_approved(self.ethereum_test_account.address, another_tx_hash))
 
@@ -359,10 +365,10 @@ class TestSafe(SafeTestCaseMixin, TestCase):
         safe_contract = safe.get_contract()
         message = b'12345'
         message_hash = safe_contract.functions.getMessageHash(message).call()
-        sign_message_data = HexBytes(safe_contract.functions.signMessage(message).buildTransaction()['data'])
+        sign_message_data = HexBytes(safe_contract.functions.signMessage(message).buildTransaction({'gas': 0})['data'])
         safe_tx = safe.build_multisig_tx(safe.address, 0, sign_message_data)
-        safe_tx.sign(self.ethereum_test_account.privateKey)
-        safe_tx.execute(tx_sender_private_key=self.ethereum_test_account.privateKey)
+        safe_tx.sign(self.ethereum_test_account.key)
+        safe_tx.execute(tx_sender_private_key=self.ethereum_test_account.key)
         self.assertTrue(safe.retrieve_is_message_signed(message_hash))
 
     def test_retrieve_is_owner(self):
@@ -439,7 +445,7 @@ class TestSafe(SafeTestCaseMixin, TestCase):
 
         safe.send_multisig_tx(to, value, data, operation, safe_tx_gas,
                               data_gas, gas_price, gas_token, refund_receiver, signature_bytes,
-                              self.ethereum_test_account.privateKey)
+                              self.ethereum_test_account.key)
 
         balance = self.w3.eth.getBalance(to)
         self.assertEqual(value, balance)

@@ -27,10 +27,13 @@ Safe Addresses. Should be the same for every chain. Check:
 https://github.com/gnosis/safe-contracts/blob/development/zos.mainnet.json
 https://github.com/gnosis/safe-contracts/blob/development/zos.rinkeby.json
 
-GnosisSafe: 0xb6029EA3B2c51D09a50B53CA8012FeEB05bDa35A
+GnosisSafeV1.1.1: 0x34CfAC646f301356fAa8B21e94227e3583Fe3F5F
+GnosisSafeV1.1.0: 0xaE32496491b53841efb51829d6f886387708F99B
+GnosisSafeV1.0.0: 0xb6029EA3B2c51D09a50B53CA8012FeEB05bDa35A
 
 Factories
-ProxyFactory: 0x12302fE9c02ff50939BaAaaf415fc226C078613C
+ProxyFactoryV1.1.0: 0x50e55Af101C777bA7A1d560a774A82eF002ced9F
+ProxyFactoryV1.0.0: 0x12302fE9c02ff50939BaAaaf415fc226C078613C
 
 Libraries
 CreateAndAddModules: 0x1a56aE690ab0818aF5cA349b7D21f1d7e76a3d36
@@ -38,16 +41,21 @@ MultiSend: 0xD4B7B161E4779629C2717385114Bf78D612aEa72
 """
 
 contracts = {
-    'safe': 'GnosisSafe.json',
-    'old_safe': 'OldGnosisSafe.json',
+    'safe': 'GnosisSafe_V1_1_1.json',
+    'safe_V1_0_0': 'GnosisSafe_V1_0_0.json',
+    'safe_V0_0_1': 'GnosisSafe_V0_0_1.json',
     'erc20': 'ERC20.json',
     'erc721': 'ERC721.json',
     'example_erc20': 'ERC20TestToken.json',
     'delegate_constructor_proxy': 'DelegateConstructorProxy.json',
     'multi_send': 'MultiSend.json',
     'paying_proxy': 'PayingProxy.json',
-    'proxy_factory': 'ProxyFactory.json',
-    'proxy': 'Proxy.json',
+    'proxy_factory': 'ProxyFactory_V1_1_1.json',
+    'proxy_factory_V1_0_0': 'ProxyFactory_V1_0_0.json',
+    'proxy': 'Proxy_V1_1_1.json',
+    'uniswap_exchange': 'uniswap_exchange.json',
+    'uniswap_factory': 'uniswap_factory.json',
+    'kyber_network_proxy': 'kyber_network_proxy.json',
 }
 
 
@@ -60,7 +68,7 @@ def generate_contract_fn(contract: Dict[str, Any]):
     def fn(w3: Web3, address: Optional[str] = None):
         return w3.eth.contract(address,
                                abi=contract['abi'],
-                               bytecode=contract['bytecode'])
+                               bytecode=contract.get('bytecode'))
     return fn
 
 
@@ -72,3 +80,7 @@ for contract_name, json_contract_filename in contracts.items():
 
 def get_paying_proxy_deployed_bytecode() -> bytes:
     return HexBytes(load_contract_interface('PayingProxy.json')['deployedBytecode'])
+
+
+def get_proxy_1_0_0_deployed_bytecode() -> bytes:
+    return HexBytes(load_contract_interface('Proxy_V1_0_0.json')['deployedBytecode'])
