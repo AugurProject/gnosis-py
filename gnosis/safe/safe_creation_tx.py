@@ -4,8 +4,6 @@ from logging import getLogger
 from typing import Any, Dict, List, Optional, Tuple
 
 import rlp
-from eth_account.internal.transactions import (
-    encode_transaction, serializable_unsigned_transaction_from_dict)
 from ethereum.exceptions import InvalidTransaction
 from ethereum.transactions import Transaction, secpk1n
 from ethereum.utils import checksum_encode, mk_contract_address
@@ -13,9 +11,10 @@ from hexbytes import HexBytes
 from web3 import Web3
 from web3.contract import ContractConstructor
 
-from gnosis.eth.constants import NULL_ADDRESS
-from gnosis.eth.contracts import (get_erc20_contract, get_old_safe_contract,
-                                  get_paying_proxy_contract)
+from gnosis.eth.constants import GAS_CALL_DATA_BYTE, NULL_ADDRESS
+from gnosis.eth.contracts import (get_erc20_contract,
+                                  get_paying_proxy_contract,
+                                  get_safe_V0_0_1_contract)
 
 logger = getLogger(__name__)
 
@@ -133,14 +132,14 @@ class SafeCreationTx:
 
         base_gas = 60580  # Transaction standard gas
 
-        # TODO If we already have the token, we don't have to pay for storage, so it will be just 5K instead of 20K.
+        # If we already have the token, we don't have to pay for storage, so it will be just 5K instead of 20K.
         # The other 1K is for overhead of making the call
         if payment_token != NULL_ADDRESS:
-            payment_token_gas = 21000
+            payment_token_gas = 55000
         else:
             payment_token_gas = 0
 
-        data_gas = 68 * len(safe_setup_data)  # Data gas
+        data_gas = GAS_CALL_DATA_BYTE * len(safe_setup_data)  # Data gas
         gas_per_owner = 18020  # Magic number calculated by testing and averaging owners
         return base_gas + data_gas + payment_token_gas + 270000 + len(owners) * gas_per_owner
 
@@ -278,7 +277,7 @@ class SafeCreationTx:
         return gas
 
     def _get_initial_setup_safe_data(self, owners: List[str], threshold: int) -> bytes:
-        return get_old_safe_contract(self.w3, self.master_copy).functions.setup(
+        return get_safe_V0_0_1_contract(self.w3, self.master_copy).functions.setup(
             owners,
             threshold,
             NULL_ADDRESS,  # Contract address for optional delegate call
@@ -287,16 +286,3 @@ class SafeCreationTx:
             'gas': 1,
             'gasPrice': 1,
         })['data']
-
-    @staticmethod
-    def _sign_web3_transaction(tx: Dict[str, Any], v: int, r: int, s: int) -> Tuple[bytes, HexBytes]:
-        """
-        Signed transaction that compatible with `w3.eth.sendRawTransaction`
-        Is not used because `pyEthereum` implementation of Transaction was found to be more
-        robust regarding invalid signatures
-        """
-        unsigned_transaction = serializable_unsigned_transaction_from_dict(tx)
-        rlp_encoded_transaction = encode_transaction(unsigned_transaction, vrs=(v, r, s))
-
-        # To get the address signing, just do ecrecover_to_pub(unsigned_transaction.hash(), v, r, s)
-        return rlp_encoded_transaction, unsigned_transaction.hash()

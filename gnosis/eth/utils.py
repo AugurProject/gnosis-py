@@ -1,6 +1,7 @@
 import os
 from typing import Tuple, Union
 
+import eth_abi
 from ethereum import utils
 from hexbytes import HexBytes
 from web3 import Web3
@@ -39,6 +40,51 @@ def generate_address_2(from_: Union[str, bytes], salt: Union[str, bytes], init_c
     assert len(salt) == 32, "Salt %s is not valid. Must be 32 bytes" % salt
     assert len(init_code) > 0, "Init code %s is not valid" % init_code
 
-    init_code_hash = Web3.sha3(init_code)
-    contract_address = Web3.sha3(HexBytes('ff') + from_ + salt + init_code_hash)
+    init_code_hash = Web3.keccak(init_code)
+    contract_address = Web3.keccak(HexBytes('ff') + from_ + salt + init_code_hash)
     return Web3.toChecksumAddress(contract_address[12:])
+
+
+def decode_string_or_bytes32(data: bytes) -> str:
+    try:
+        return eth_abi.decode_abi(['string'], data)[0]
+    except OverflowError:
+        name = eth_abi.decode_abi(['bytes32'], data)[0]
+        end_position = name.find(b'\x00')
+        if end_position == -1:
+            return name.decode()
+        else:
+            return name[:end_position].decode()
+
+
+def remove_swarm_metadata(code: bytes) -> bytes:
+    """
+    Remove swarm metadata from Solidity bytecode
+    :param code:
+    :return: Code without metadata
+    """
+    swarm = b'\xa1\x65bzzr0'
+    position = code.find(swarm)
+    if position == -1:
+        raise ValueError('Swarm metadata not found in code %s' % code.hex())
+    return code[:position]
+
+
+def compare_byte_code(code_1: bytes, code_2: bytes) -> bool:
+    """
+    Compare code, removing swarm metadata if necessary
+    :param code_1:
+    :param code_2:
+    :return: True if same code, False otherwise
+    """
+    if code_1 == code_2:
+        return True
+    else:
+        codes = []
+        for code in (code_1, code_2):
+            try:
+                codes.append(remove_swarm_metadata(code))
+            except ValueError:
+                codes.append(code)
+
+        return codes[0] == codes[1]

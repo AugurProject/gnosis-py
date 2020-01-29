@@ -4,13 +4,13 @@ from typing import List, NamedTuple, Optional
 
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
-from ethereum.utils import checksum_encode
 from hexbytes import HexBytes
 from web3 import Web3
 
-from gnosis.eth.constants import NULL_ADDRESS
+from gnosis.eth.constants import GAS_CALL_DATA_BYTE, NULL_ADDRESS
 from gnosis.eth.contracts import (get_delegate_constructor_proxy_contract,
-                                  get_old_safe_contract, get_safe_contract)
+                                  get_safe_contract, get_safe_V0_0_1_contract,
+                                  get_safe_V1_0_0_contract)
 from gnosis.eth.ethereum_client import EthereumClient, EthereumTxSent
 from gnosis.eth.utils import get_eth_address_with_key
 from gnosis.safe.proxy_factory import ProxyFactory
@@ -37,6 +37,8 @@ class SafeOperation(Enum):
 
 
 class Safe:
+    FALLBACK_HANDLER_STORAGE_SLOT = '0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5'
+
     def __init__(self, address: str, ethereum_client: EthereumClient):
         assert Web3.isChecksumAddress(address), '%s is not a valid address' % address
 
@@ -47,6 +49,7 @@ class Safe:
     @staticmethod
     def create(ethereum_client: EthereumClient, deployer_account: LocalAccount,
                master_copy_address: str, owners: List[str], threshold: int,
+               fallback_handler: str = NULL_ADDRESS,
                proxy_factory_address: Optional[str] = None,
                payment_token: str = NULL_ADDRESS, payment: int = 0,
                payment_receiver: str = NULL_ADDRESS) -> EthereumTxSent:
@@ -68,6 +71,7 @@ class Safe:
             threshold,
             NULL_ADDRESS,  # Contract address for optional delegate call
             b'',  # Data payload for optional delegate call
+            fallback_handler,  # Handler for fallback calls to this contract,
             payment_token,
             payment,
             payment_receiver
@@ -81,7 +85,7 @@ class Safe:
         tx = proxy_contract.constructor(master_copy_address,
                                         initializer).buildTransaction({'from': deployer_account.address})
         tx['gas'] = tx['gas'] * 100000
-        tx_hash = ethereum_client.send_unsigned_transaction(tx, private_key=deployer_account.privateKey)
+        tx_hash = ethereum_client.send_unsigned_transaction(tx, private_key=deployer_account.key)
         tx_receipt = ethereum_client.get_transaction_receipt(tx_hash, timeout=60)
         assert tx_receipt.status
 
@@ -92,13 +96,34 @@ class Safe:
     def deploy_master_contract(ethereum_client: EthereumClient, deployer_account: LocalAccount) -> EthereumTxSent:
         """
         Deploy master contract. Takes deployer_account (if unlocked in the node) or the deployer private key
+        Safe with version > v1.1.1 doesn't need to be initialized as it already has a constructor
         :param ethereum_client:
         :param deployer_account: Ethereum account
         :return: deployed contract address
         """
 
         safe_contract = get_safe_contract(ethereum_client.w3)
-        constructor_data = safe_contract.constructor().buildTransaction()['data']
+        constructor_tx = safe_contract.constructor().buildTransaction()
+        tx_hash = ethereum_client.send_unsigned_transaction(constructor_tx, private_key=deployer_account.key)
+        tx_receipt = ethereum_client.get_transaction_receipt(tx_hash, timeout=60)
+        assert tx_receipt.status
+
+        ethereum_tx_sent = EthereumTxSent(tx_hash, constructor_tx, tx_receipt.contractAddress)
+        logger.info("Deployed and initialized Safe Master Contract=%s by %s", ethereum_tx_sent.contract_address,
+                    deployer_account.address)
+        return ethereum_tx_sent
+
+    @staticmethod
+    def deploy_master_contract_v1_0_0(ethereum_client: EthereumClient, deployer_account: LocalAccount) -> EthereumTxSent:
+        """
+        Deploy master contract. Takes deployer_account (if unlocked in the node) or the deployer private key
+        :param ethereum_client:
+        :param deployer_account: Ethereum account
+        :return: deployed contract address
+        """
+
+        safe_contract = get_safe_V1_0_0_contract(ethereum_client.w3)
+        constructor_data = safe_contract.constructor().buildTransaction({'gas': 0})['data']
         initializer_data = safe_contract.functions.setup(
             # We use 2 owners that nobody controls for the master copy
             ["0x0000000000000000000000000000000000000002", "0x0000000000000000000000000000000000000003"],
@@ -125,8 +150,8 @@ class Safe:
         :return: deployed contract address
         """
 
-        safe_contract = get_old_safe_contract(ethereum_client.w3)
-        constructor_data = safe_contract.constructor().buildTransaction()['data']
+        safe_contract = get_safe_V0_0_1_contract(ethereum_client.w3)
+        constructor_data = safe_contract.constructor().buildTransaction({'gas': 0})['data']
         initializer_data = safe_contract.functions.setup(
             # We use 2 owners that nobody controls for the master copy
             ["0x0000000000000000000000000000000000000002", "0x0000000000000000000000000000000000000003"],
@@ -168,6 +193,7 @@ class Safe:
                                  master_copy_address: str, proxy_factory_address: str,
                                  number_owners: int, gas_price: int,
                                  payment_token: Optional[str], payment_receiver: str = NULL_ADDRESS,
+                                 fallback_handler: Optional[str] = NULL_ADDRESS,
                                  payment_token_eth_value: float = 1.0,
                                  fixed_creation_cost: Optional[int] = None,
                                  setup_data: Optional[bytes] = b'',
@@ -182,6 +208,7 @@ class Safe:
                                                 proxy_factory_address=proxy_factory_address
                                                 ).build(owners=owners,
                                                         threshold=threshold,
+                                                        fallback_handler=fallback_handler,
                                                         salt_nonce=salt_nonce,
                                                         gas_price=gas_price,
                                                         payment_receiver=payment_receiver,
@@ -222,6 +249,7 @@ class Safe:
                               salt_nonce: int, owners: List[str], threshold: int, gas_price: int,
                               payment_token: Optional[str],
                               payment_receiver: Optional[str] = None,  # If none, it will be `tx.origin`
+                              fallback_handler: Optional[str] = NULL_ADDRESS,
                               payment_token_eth_value: float = 1.0,
                               fixed_creation_cost: Optional[int] = None,
                               setup_data: Optional[str] = '',
@@ -237,6 +265,7 @@ class Safe:
                                                     proxy_factory_address=proxy_factory_address
                                                     ).build(owners=owners,
                                                             threshold=threshold,
+                                                            fallback_handler=fallback_handler,
                                                             salt_nonce=salt_nonce,
                                                             gas_price=gas_price,
                                                             payment_receiver=payment_receiver,
@@ -285,15 +314,15 @@ class Safe:
         nonce = self.retrieve_nonce()
 
         # Every byte == 0 -> 4  Gas
-        # Every byte != 0 -> 68 Gas
-        # numbers < 256 (0x00(31*2)..ff) are 192 -> 31 * 4 + 1 * 68
-        # numbers < 65535 (0x(30*2)..ffff) are 256 -> 30 * 4 + 2 * 68
+        # Every byte != 0 -> 16 Gas (68 before Istanbul)
+        # numbers < 256 (0x00(31*2)..ff) are 192 -> 31 * 4 + 1 * GAS_CALL_DATA_BYTE
+        # numbers < 65535 (0x(30*2)..ffff) are 256 -> 30 * 4 + 2 * GAS_CALL_DATA_BYTE
 
         # Calculate gas for signatures
         # (array count (3 -> r, s, v) + ecrecover costs) * signature count
         # ecrecover for ecdsa ~= 4K gas, we use 6K
         ecrecover_gas = 6000
-        signature_gas = threshold * (1 * 68 + 2 * 32 * 68 + ecrecover_gas)
+        signature_gas = threshold * (1 * GAS_CALL_DATA_BYTE + 2 * 32 * GAS_CALL_DATA_BYTE + ecrecover_gas)
 
         safe_tx_gas = estimate_tx_gas
         base_gas = 0
@@ -464,6 +493,13 @@ class Safe:
     def retrieve_code(self) -> HexBytes:
         return self.w3.eth.getCode(self.address)
 
+    def retrieve_fallback_handler(self) -> str:
+        address = self.ethereum_client.w3.eth.getStorageAt(self.address, self.FALLBACK_HANDLER_STORAGE_SLOT)[-20:]
+        if len(address) == 20:
+            return Web3.toChecksumAddress(address)
+        else:
+            return NULL_ADDRESS
+
     def retrieve_master_copy_address(self, block_identifier: Optional[str] = 'latest') -> str:
         bytes_address = self.w3.eth.getStorageAt(self.address, 0, block_identifier=block_identifier)[-20:]
         int_address = int.from_bytes(bytes_address, byteorder='big')
@@ -564,7 +600,7 @@ class Safe:
                                          refund_receiver,
                                          signatures)
 
-        tx_sender_address = Account.privateKeyToAccount(tx_sender_private_key).address
+        tx_sender_address = Account.from_key(tx_sender_private_key).address
         safe_tx.call(tx_sender_address=tx_sender_address, block_identifier=block_identifier)
 
         tx_hash, tx = safe_tx.execute(tx_sender_private_key=tx_sender_private_key,
