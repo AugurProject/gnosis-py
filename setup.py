@@ -9,18 +9,18 @@ with open(os.path.join(os.path.dirname(__file__), 'README.rst')) as readme:
 os.chdir(os.path.normpath(os.path.join(os.path.abspath(__file__), os.pardir)))
 
 requirements = [
-    "Django>=2.0.0",
+    "Django>=2",
+    "django-filter>=2",
     "ethereum>=2.3.2",
-    "eth-abi2",
-    "hexbytes>=0.1.0",
     "packaging",
     "py-eth-sig-utils>=0.3.0",
+    "requests>=2",
     "web3>=5",
 ]
 
 setup(
     name='gnosis-py',
-    version='2.0.7',
+    version='2.1.2',
     packages=find_packages(),
     install_requires=requirements,
     include_package_data=True,
